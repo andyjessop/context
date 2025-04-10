@@ -1,0 +1,8 @@
+{
+	"name": "context",
+	"type": "module",
+	"scripts": {
+		"serve": "bun run ./src/index.ts",
+		"compile": "bun build ./src/index.ts --compile --outfile dist/context"
+	}
+}

@@ -1,0 +1,18 @@
+{
+  "name": "bun-playground",
+  "license": "ISC",
+  "type": "module",
+  "scripts": {
+    "serve:context": "bun run --cwd ./apps/context serve",
+    "compile:context": "bun run --cwd ./apps/context compile"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "1.6.2",
+    "@types/bun": "^1.0.10"
+  },
+  "workspaces": ["apps/*", "packages/*"],
+  "dependencies": {
+    "@types/minimist": "^1.2.5",
+    "minimist": "^1.2.8"
+  }
+}
