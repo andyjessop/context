@@ -6,7 +6,7 @@ import minimist from "minimist";
 
 /**
  * Attempts to locate the nearest Git repository root by:
- *  1. Starting at the given folder (resolved to an absolute path).
+ *  1. Starting at the given folder (resolved to absolute path).
  *  2. Running "git rev-parse --show-toplevel".
  *  3. If it fails, move up one directory and try again.
  *  4. Repeat until either a valid Git root is found or the filesystem root is reached.
@@ -22,8 +22,8 @@ async function findGitRootUp(folder: string): Promise<string> {
       const trimmed = root.trim();
       console.log(`[INFO] Found valid Git root: "${trimmed}" (absolute: "${path.resolve(trimmed)}")`);
       return trimmed;
-    } catch (err) {
-      // If rev-parse fails, move one directory up and try again.
+    } catch (_err) {
+      // If rev-parse fails, move one directory up and try again
       const parentDir = path.dirname(currentDir);
       if (parentDir === currentDir) {
         // We've reached the root of the filesystem without success
@@ -38,50 +38,83 @@ async function findGitRootUp(folder: string): Promise<string> {
 async function main(): Promise<void> {
   // 1. Parse CLI arguments
   const args = minimist(process.argv.slice(2));
-  const inputFolder: string = args.inputFolder || ".";
+  const inputFolderArg: string = args.inputFolder || ".";
   const outputFile: string = args.outputFile || "./context.txt";
   const isDryRun: boolean = Boolean(args["dry-run"]);
 
-  // Compute absolute paths to aid debugging
-  const absInputFolder = path.resolve(inputFolder);
+  // Compute absolute paths for clearer logging
+  const absInputFolder = path.resolve(inputFolderArg);
   const absOutputFile = path.resolve(outputFile);
 
   console.log(`[INFO] Script invoked with:
-    inputFolder    = "${inputFolder}"   (absolute: "${absInputFolder}")
-    outputFile     = "${outputFile}"    (absolute: "${absOutputFile}")
+    inputFolder    = "${inputFolderArg}" (absolute: "${absInputFolder}")
+    outputFile     = "${outputFile}"      (absolute: "${absOutputFile}")
     dryRun         = ${isDryRun}
   `);
 
-  // 2. Attempt to locate a valid Git root by going up the directory tree
+  // 2. Attempt to locate the nearest Git root
   let gitRoot: string;
   try {
-    gitRoot = await findGitRootUp(inputFolder);
+    gitRoot = await findGitRootUp(absInputFolder);
   } catch (error) {
     console.error((error as Error).message);
     process.exit(1);
   }
-
   console.log(`[INFO] Using Git root: "${gitRoot}"`);
 
-  // 3. Gather files with git ls-files (includes untracked but not ignored)
-  console.log(`[INFO] Running "git ls-files --others --cached --exclude-standard -- ${inputFolder}" from Git root: "${gitRoot}"`);
-  const stdout = await $`git ls-files --others --cached --exclude-standard -- ${inputFolder}`
+  // 3. Compute the path from the Git root to our input folder
+  //    If the computed path is empty, use "." so Git doesn't get confused
+  const relativeInput = path.relative(gitRoot, absInputFolder) || ".";
+
+  console.log(`[INFO] Will gather files from subdirectory (relative to root): "${relativeInput}"
+    (This ensures only files within that folder are included.)
+  `);
+
+  // 4. Gather files using "git ls-files" (tracked + untracked, ignoring .gitignore).
+  console.log(`[INFO] Running: "git ls-files --others --cached --exclude-standard -- ${relativeInput}" from Git root: "${gitRoot}"`);
+  const stdout = await $`git ls-files --others --cached --exclude-standard -- ${relativeInput}`
     .cwd(gitRoot)
     .text();
 
-  const files = stdout.trim().split("\n").filter(Boolean);
-  console.log(`[INFO] Number of files discovered: ${files.length}`);
+  // 5. Build a list of files, then filter out lock files already in the repo or untracked
+  let files = stdout.trim().split("\n").filter(Boolean);
+  console.log(`[INFO] Number of files discovered (before filtering lock files): ${files.length}`);
 
-  // 4. Read contents of each file and form the combined string
+  const lockFilePatterns = [
+    /\.lockb$/i,
+    /\.lock$/i,
+    /package-lock\.json$/i,
+    /yarn\.lock$/i,
+    /pnpm-lock\.ya?ml$/i,
+    /composer\.lock$/i,
+    /Gemfile\.lock$/i,
+    /Cargo\.lock$/i,
+    /Pipfile\.lock$/i,
+    /poetry\.lock$/i,
+    /pubspec\.lock$/i,
+    /Podfile\.lock$/i,
+    /build\.gradle\.lockfile$/i,
+    /mix\.lock$/i
+  ];
+
+  files = files.filter(filePath => {
+    // If any lock pattern matches, exclude the file
+    return !lockFilePatterns.some(pattern => pattern.test(filePath));
+  });
+  console.log(`[INFO] Number of files discovered (after filtering lock files): ${files.length}`);
+
+  // 6. Read contents of each file and form the combined string
   let outputString = "";
   for (const filePath of files) {
-    const resolvedPath = path.resolve(gitRoot, filePath);
+    // The path from git ls-files is relative to gitRoot,
+    // so we must resolve it from gitRoot to get the absolute path
+    const resolvedPath = path.join(gitRoot, filePath);
     console.log(`[INFO] Adding to context: "${resolvedPath}"`);
     const fileContents = fs.readFileSync(resolvedPath, "utf-8");
     outputString += `File: ${resolvedPath}\n\n${fileContents}\n\n`;
   }
 
-  // 5. Respect --dry-run
+  // 7. Write or skip based on --dry-run
   if (isDryRun) {
     console.log(`[INFO] Dry run mode is enabled. The context file "${outputFile}" (absolute: "${absOutputFile}") will NOT be created.`);
   } else {
