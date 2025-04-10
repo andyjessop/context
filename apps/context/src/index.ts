@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { $ } from "bun";
-import * as fs from "node:fs";
+import { file as bunFile, write as bunWrite } from "bun";
 import * as path from "node:path";
 import minimist from "minimist";
 
@@ -22,17 +22,42 @@ async function findGitRootUp(folder: string): Promise<string> {
       const trimmed = root.trim();
       console.log(`[INFO] Found valid Git root: "${trimmed}" (absolute: "${path.resolve(trimmed)}")`);
       return trimmed;
-    } catch (_err) {
+    } catch {
       // If rev-parse fails, move one directory up and try again
       const parentDir = path.dirname(currentDir);
       if (parentDir === currentDir) {
-        // We've reached the root of the filesystem without success
         console.error(`[ERROR] Failed to find a valid Git repository above "${folder}". Last attempt was "${currentDir}".`);
         throw new Error(`Could not find a valid Git repository above "${folder}".`);
       }
       currentDir = parentDir;
     }
   }
+}
+
+/**
+ * Checks whether a MIME type is considered textual for our purposes.
+ * Here, we allow:
+ *  - text/*
+ *  - application/json
+ *  - application/xml
+ *  - application/javascript
+ *  - application/typescript
+ *
+ * Adjust or add more as needed.
+ */
+function isTextMIME(mimeType: string): boolean {
+  if (mimeType.startsWith("text/")) return true;
+
+  // Normalise the MIME type so e.g. "application/json;charset=utf-8" becomes "application/json"
+  // We'll just strip any ";charset=" info.
+  const [baseType] = mimeType.split(";").map((segment) => segment.trim().toLowerCase());
+
+  return [
+    "application/json",
+    "application/xml",
+    "application/javascript",
+    "application/typescript"
+  ].includes(baseType);
 }
 
 async function main(): Promise<void> {
@@ -47,9 +72,9 @@ async function main(): Promise<void> {
   const absOutputFile = path.resolve(outputFile);
 
   console.log(`[INFO] Script invoked with:
-    inputFolder    = "${inputFolderArg}" (absolute: "${absInputFolder}")
-    outputFile     = "${outputFile}"      (absolute: "${absOutputFile}")
-    dryRun         = ${isDryRun}
+    inputFolder = "${inputFolderArg}" (absolute: "${absInputFolder}")
+    outputFile  = "${outputFile}"     (absolute: "${absOutputFile}")
+    dryRun      = ${isDryRun}
   `);
 
   // 2. Attempt to locate the nearest Git root
@@ -62,24 +87,23 @@ async function main(): Promise<void> {
   }
   console.log(`[INFO] Using Git root: "${gitRoot}"`);
 
-  // 3. Compute the path from the Git root to our input folder
-  //    If the computed path is empty, use "." so Git doesn't get confused
+  // 3. Compute the relative path from Git root to our input folder
   const relativeInput = path.relative(gitRoot, absInputFolder) || ".";
 
-  console.log(`[INFO] Will gather files from subdirectory (relative to root): "${relativeInput}"
-    (This ensures only files within that folder are included.)
-  `);
+  console.log(`[INFO] Will gather files from subdirectory: "${relativeInput}" (relative to root: "${gitRoot}")`);
 
-  // 4. Gather files using "git ls-files" (tracked + untracked, ignoring .gitignore).
-  console.log(`[INFO] Running: "git ls-files --others --cached --exclude-standard -- ${relativeInput}" from Git root: "${gitRoot}"`);
+  // 4. Gather files using git ls-files
+  //    (tracked + untracked, ignoring .gitignored).
+  console.log(`[INFO] Running "git ls-files --others --cached --exclude-standard -- ${relativeInput}" from Git root: "${gitRoot}"`);
   const stdout = await $`git ls-files --others --cached --exclude-standard -- ${relativeInput}`
     .cwd(gitRoot)
     .text();
 
-  // 5. Build a list of files, then filter out lock files already in the repo or untracked
   let files = stdout.trim().split("\n").filter(Boolean);
   console.log(`[INFO] Number of files discovered (before filtering lock files): ${files.length}`);
 
+  // 5. Filter out lock files or other patterns you may not want.
+  //    For simplicity, we reuse your lockFilePatterns from earlier.
   const lockFilePatterns = [
     /\.lockb$/i,
     /\.lock$/i,
@@ -98,27 +122,35 @@ async function main(): Promise<void> {
   ];
 
   files = files.filter(filePath => {
-    // If any lock pattern matches, exclude the file
     return !lockFilePatterns.some(pattern => pattern.test(filePath));
   });
   console.log(`[INFO] Number of files discovered (after filtering lock files): ${files.length}`);
 
-  // 6. Read contents of each file and form the combined string
+  // 6. Read contents of each file with Bun.file if it is textual
   let outputString = "";
   for (const filePath of files) {
-    // The path from git ls-files is relative to gitRoot,
-    // so we must resolve it from gitRoot to get the absolute path
-    const resolvedPath = path.join(gitRoot, filePath);
-    console.log(`[INFO] Adding to context: "${resolvedPath}"`);
-    const fileContents = fs.readFileSync(resolvedPath, "utf-8");
-    outputString += `File: ${resolvedPath}\n\n${fileContents}\n\n`;
+    const absoluteFile = path.join(gitRoot, filePath);
+    const bunF = bunFile(absoluteFile);
+    const mime = bunF.type;
+
+    // Check if it's textual
+    if (!isTextMIME(mime)) {
+      console.log(`[INFO] Skipping non-text file: "${absoluteFile}" (MIME: "${mime}")`);
+      continue;
+    }
+
+    console.log(`[INFO] Adding to context: "${absoluteFile}" (MIME: "${mime}")`);
+    // read the text
+    const fileContents = await bunF.text();
+    outputString += `File: ${absoluteFile}\n\n${fileContents}\n\n`;
   }
 
   // 7. Write or skip based on --dry-run
   if (isDryRun) {
     console.log(`[INFO] Dry run mode is enabled. The context file "${outputFile}" (absolute: "${absOutputFile}") will NOT be created.`);
   } else {
-    fs.writeFileSync(absOutputFile, outputString);
+    // Use Bun.write to create or overwrite the file
+    await bunWrite(absOutputFile, outputString);
     console.log(`[INFO] Contents saved to "${absOutputFile}".`);
   }
 }
